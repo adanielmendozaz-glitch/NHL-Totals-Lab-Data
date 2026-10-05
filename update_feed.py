@@ -129,7 +129,7 @@ def score_games_for_date(day):
 def fetch_schedule_window(today=None):
     today=today or datetime.datetime.now(datetime.timezone.utc).date()
     out=[]; errs={}
-    for delta in range(-7,4):
+    for delta in range(-14,4):
         day=(today+datetime.timedelta(days=delta)).isoformat()
         try:
             out.extend(score_games_for_date(day))
@@ -206,40 +206,90 @@ def fetch_special_teams(year):
     return out
 
 def recent_team_form(year):
-    """Compact current-season L5/L10 MoneyPuck team-game xG trends.
-    This bulk download runs only in GitHub Actions, not on the user's phone.
+    """Current-season rolling form with opponent adjustment.
+
+    Uses only games already present in MoneyPuck at feed-build time. Opponents are
+    inferred from the two team rows that share a gameID, so this survives if an
+    explicit opponent column is absent. The adjusted block is intentionally compact:
+    it is a bounded signal for current predictions, not a historical walk-forward
+    backtest (that comes in the Backtest Lab phase).
     """
     txt=fetch_text(MP_GAMES,120)
-    teams={}
+    rows=[]
     for r in csv.DictReader(io.StringIO(txt)):
         try: sy=int(float(r.get('season','0') or 0))
         except Exception: continue
         if sy!=year or str(r.get('situation','')).lower()!='all': continue
         code=normalize_code(first(r,'team','playerTeam','name'))
-        if not code: continue
-        date=str(r.get('gameDate',''))
-        item={
-            'date':date,
-            'xgf':fnum(r.get('xGoalsFor')),
-            'xga':fnum(r.get('xGoalsAgainst')),
-            'gf':fnum(r.get('goalsFor')),
-            'ga':fnum(r.get('goalsAgainst')),
-            'sf':fnum(r.get('shotsOnGoalFor')),
-            'sa':fnum(r.get('shotsOnGoalAgainst')),
-        }
-        teams.setdefault(code,[]).append(item)
+        gid=str(first(r,'gameID','gameId','game_id') or '')
+        if not code or not gid: continue
+        rows.append({
+            'team':code,'gameId':gid,'date':str(r.get('gameDate','')),
+            'xgf':fnum(r.get('xGoalsFor')),'xga':fnum(r.get('xGoalsAgainst')),
+            'gf':fnum(r.get('goalsFor')),'ga':fnum(r.get('goalsAgainst')),
+            'sf':fnum(r.get('shotsOnGoalFor')),'sa':fnum(r.get('shotsOnGoalAgainst')),
+        })
+    by_game={}
+    for x in rows: by_game.setdefault(x['gameId'],[]).append(x)
+    by_team={}
+    for x in rows: by_team.setdefault(x['team'],[]).append(x)
+    def avg(vals):
+        vals=[v for v in vals if v is not None]
+        return sum(vals)/len(vals) if vals else None
+    team_base={}
+    all_x=[]
+    for code,rr in by_team.items():
+        team_base[code]={'n':len(rr),'xgf':avg([x['xgf'] for x in rr]),'xga':avg([x['xga'] for x in rr])}
+        all_x.extend([x['xgf'] for x in rr if x['xgf'] is not None])
+    league=sum(all_x)/len(all_x) if all_x else 3.0
+    # Attach inferred opponent.
+    for game_rows in by_game.values():
+        teams=[x['team'] for x in game_rows]
+        if len(set(teams))!=2: continue
+        for x in game_rows:
+            x['opp']=next((t for t in teams if t!=x['team']),None)
     out={}
-    for code,rows in teams.items():
-        rows=sorted(rows,key=lambda x:x['date'],reverse=True)
-        d={'games':len(rows)}
+    for code,rr in by_team.items():
+        rr=sorted(rr,key=lambda x:x['date'],reverse=True)
+        d={'games':len(rr)}
         for n in (5,10,20):
-            rr=rows[:n]
-            if not rr: continue
+            win=rr[:n]
+            if not win: continue
             z={}
             for k in ('xgf','xga','gf','ga','sf','sa'):
-                vals=[x[k] for x in rr if x[k] is not None]
+                vals=[x[k] for x in win if x[k] is not None]
                 if vals: z[k]=round(sum(vals)/len(vals),5)
-            z['n']=len(rr); d[f'l{n}']=z
+            z['n']=len(win); d[f'l{n}']=z
+        adj=[]
+        for x in rr[:10]:
+            opp=x.get('opp'); ob=team_base.get(opp or '',{})
+            on=float(ob.get('n') or 0); ow=on/(on+8.0)
+            opp_allow=(ob.get('xga') if ob.get('xga') is not None else league)
+            opp_create=(ob.get('xgf') if ob.get('xgf') is not None else league)
+            exp_for=league*(1-ow)+opp_allow*ow
+            exp_against=league*(1-ow)+opp_create*ow
+            if x['xgf'] is None or x['xga'] is None: continue
+            adj.append({
+                'date':x['date'],'opp':opp,
+                'off':x['xgf']-exp_for,
+                'def':x['xga']-exp_against,
+                'total':(x['xgf']+x['xga'])-(exp_for+exp_against),
+            })
+        if adj:
+            weights=[0.78**i for i in range(len(adj))]
+            sw=sum(weights)
+            wav=lambda key: sum(w*a[key] for w,a in zip(weights,adj))/sw
+            n=len(adj); rel=n/(n+8.0)
+            d['adjusted']={
+                'n':n,
+                'offResidual':round(wav('off'),5),
+                'defResidual':round(wav('def'),5),
+                'netResidual':round(wav('off')-wav('def'),5),
+                'totalResidual':round(wav('total'),5),
+                'reliability':round(rel,5),
+                'lastDate':adj[0]['date'],
+                'method':'OPP_ADJ_EWMA_078',
+            }
         out[code]=d
     return out
 
@@ -326,9 +376,9 @@ def main():
     if f'{prev}/teams.csv' not in files:
         raise SystemExit('No se pudo obtener el prior MoneyPuck de equipos; no se sobrescribe el feed.')
     payload={
-        'schema':5,
-        'source':'MoneyPuck.com + NHL Stats/Web API · Player/Lineup + Schedule Intelligence',
-        'credit':'Data courtesy of MoneyPuck.com; official schedule/rosters/game context from NHL Web API; special teams from NHL Stats API',
+        'schema':6,
+        'source':'MoneyPuck.com + NHL Stats/Web API · Performance Intelligence V1',
+        'credit':'Data courtesy of MoneyPuck.com; official schedule/rosters/game context from NHL Web API; special teams from NHL Stats API; form adjusted by opponent strength in-feed',
         'updatedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'season':season,'previous':prev,'files':files,'specialTeams':special,'rolling':rolling,'skaters':skaters,'official':official,'errors':errors,
     }
