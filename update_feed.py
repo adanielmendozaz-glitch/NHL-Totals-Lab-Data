@@ -129,7 +129,7 @@ def score_games_for_date(day):
 def fetch_schedule_window(today=None):
     today=today or datetime.datetime.now(datetime.timezone.utc).date()
     out=[]; errs={}
-    for delta in range(-2,4):
+    for delta in range(-7,4):
         day=(today+datetime.timedelta(days=delta)).isoformat()
         try:
             out.extend(score_games_for_date(day))
@@ -243,9 +243,39 @@ def recent_team_form(year):
         out[code]=d
     return out
 
+
+
+def compact_skaters(year):
+    """Compact MoneyPuck skater season summary for lineup impact.
+    Keeps only totals/rates required by LINEUP_IMPACT_V1 and keys by stable playerId when possible.
+    """
+    txt=fetch_text(f'{MP_BASE}/{year}/regular/skaters.csv',120)
+    out={}
+    for r in csv.DictReader(io.StringIO(txt)):
+        sit=str(r.get('situation') or '').lower()
+        if sit not in ('all','5on5','5on4'): continue
+        name=str(first(r,'name','playerName','player') or '').strip()
+        if not name: continue
+        pid=first(r,'playerId','playerID','player_id')
+        key=('id:'+str(pid)) if pid not in (None,'') else ('nm:'+name.lower())
+        code=normalize_code(first(r,'team','playerTeam','teamAbbrev','teamCode'))
+        z=out.setdefault(key,{'id':pid,'name':name,'team':code,'position':str(first(r,'position','positionCode') or '')})
+        d={
+            'gp':fnum(first(r,'games_played','gamesPlayed','games')),
+            'ice':fnum(first(r,'icetime','iceTime')),
+            'ixg':fnum(first(r,'I_F_xGoals','individualExpectedGoals','xGoals')),
+            'goals':fnum(first(r,'I_F_goals','goals')),
+            'p1a':fnum(first(r,'I_F_primaryAssists','primaryAssists')),
+            'p2a':fnum(first(r,'I_F_secondaryAssists','secondaryAssists')),
+            'onXGF':fnum(first(r,'OnIce_F_xGoals','onIceExpectedGoalsFor','xGoalsFor')),
+            'onXGA':fnum(first(r,'OnIce_A_xGoals','onIceExpectedGoalsAgainst','xGoalsAgainst')),
+        }
+        z[sit]=d
+    return out
+
 def main():
     season=season_start(); prev=season-1
-    files={}; errors={}; special={}; rolling={}; official={'protocol':'NHL_OFFICIAL_FEED_V1'}
+    files={}; errors={}; special={}; rolling={}; skaters={}; official={'protocol':'NHL_OFFICIAL_FEED_V1'}
     for yr in (season,prev):
         for name in ('teams.csv','goalies.csv','goalies_10.csv','goalies_20.csv'):
             key=f'{yr}/{name}'; url=f'{MP_BASE}/{yr}/regular/{name}'
@@ -262,6 +292,12 @@ def main():
             print('OK',yr,'specialTeams',len(special[str(yr)]))
         except Exception as e:
             errors[f'{yr}/specialTeams']=str(e); print('WARN specialTeams',yr,e,file=sys.stderr)
+    try:
+        for yr in (season,prev):
+            skaters[str(yr)]=compact_skaters(yr)
+            print('OK',yr,'skaters compact',len(skaters[str(yr)]))
+    except Exception as e:
+        errors['skaters']=str(e); print('WARN skaters',e,file=sys.stderr)
     if os.environ.get('GITHUB_ACTIONS'):
         try:
             rolling[str(season)]=recent_team_form(season)
@@ -290,11 +326,11 @@ def main():
     if f'{prev}/teams.csv' not in files:
         raise SystemExit('No se pudo obtener el prior MoneyPuck de equipos; no se sobrescribe el feed.')
     payload={
-        'schema':4,
-        'source':'MoneyPuck.com + NHL Stats/Web API · Official Data Hotfix',
+        'schema':5,
+        'source':'MoneyPuck.com + NHL Stats/Web API · Player/Lineup + Schedule Intelligence',
         'credit':'Data courtesy of MoneyPuck.com; official schedule/rosters/game context from NHL Web API; special teams from NHL Stats API',
         'updatedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'season':season,'previous':prev,'files':files,'specialTeams':special,'rolling':rolling,'official':official,'errors':errors,
+        'season':season,'previous':prev,'files':files,'specialTeams':special,'rolling':rolling,'skaters':skaters,'official':official,'errors':errors,
     }
     OUT.parent.mkdir(parents=True,exist_ok=True)
     tmp=OUT.with_suffix('.tmp')
