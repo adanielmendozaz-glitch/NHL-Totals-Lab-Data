@@ -140,7 +140,7 @@ def main():
     season=season_start(); prev=season-1
     files={}; errors={}; special={}; rolling={}
     for yr in (season,prev):
-        for name in ('teams.csv','goalies.csv'):
+        for name in ('teams.csv','goalies.csv','goalies_10.csv','goalies_20.csv'):
             key=f'{yr}/{name}'; url=f'{MP_BASE}/{yr}/regular/{name}'
             try:
                 txt=fetch_text(url)
@@ -164,9 +164,9 @@ def main():
     if f'{prev}/teams.csv' not in files:
         raise SystemExit('No se pudo obtener el prior MoneyPuck de equipos; no se sobrescribe el feed.')
     payload={
-        'schema':2,
-        'source':'MoneyPuck.com + NHL Stats API',
-        'credit':'Data courtesy of MoneyPuck.com; team special-teams data from NHL Stats API',
+        'schema':3,
+        'source':'MoneyPuck.com + NHL Stats API · Goalie Intelligence 2.0',
+        'credit':'Data courtesy of MoneyPuck.com; team special-teams data from NHL Stats API; goalie L10/L20 windows from MoneyPuck',
         'updatedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'season':season,'previous':prev,'files':files,'specialTeams':special,'rolling':rolling,'errors':errors,
     }
